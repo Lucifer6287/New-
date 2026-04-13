@@ -926,51 +926,29 @@ document.getElementById('hero').addEventListener('click', e => {
   }
 });
 
-// ============ DATABASE SETUP ============
-let db = null;
+// ============ API SETUP ============
+const API_BASE = 'http://localhost:3000/api';
 let photos = [];
 
-// Initialize IndexedDB
-function initDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('PhotoGalleryDB', 1);
-    
-    request.onerror = () => {
-      console.error('Database failed to open');
-      reject(request.error);
-    };
-    
-    request.onsuccess = () => {
-      db = request.result;
-      console.log('Database opened successfully');
-      loadPhotosFromDB();
-      resolve(db);
-    };
-    
-    request.onupgradeneeded = (e) => {
-      const database = e.target.result;
-      if (!database.objectStoreNames.contains('photos')) {
-        database.createObjectStore('photos', { keyPath: 'id', autoIncrement: true });
-      }
-    };
-  });
-}
-
-// Load photos from IndexedDB
-function loadPhotosFromDB() {
-  if (!db) return;
-  const transaction = db.transaction(['photos'], 'readonly');
-  const objectStore = transaction.objectStore('photos');
-  const request = objectStore.getAll();
-  
-  request.onsuccess = () => {
-    photos = request.result;
-  };
+// Load photos from server
+async function loadPhotosFromServer() {
+  try {
+    const response = await fetch(`${API_BASE}/photos`);
+    if (response.ok) {
+      photos = await response.json();
+      console.log(`Loaded ${photos.length} photos from server`);
+    } else {
+      console.warn('Server not responding. Using local storage.');
+    }
+  } catch (err) {
+    console.error('Cannot connect to server:', err.message);
+    showToast('⚠️ Server not found. Make sure to run: npm install && npm start');
+  }
 }
 
 // ============ PIN / GALLERY ============
-const VIEW_PIN = '1234';      // PIN for viewing photos only
-const UPLOAD_PIN = '2026';    // PIN for uploading photos (default, can be changed)
+const VIEW_PIN = '6287';      // PIN for viewing photos only
+const UPLOAD_PIN = '2083';    // PIN for uploading photos (default, can be changed)
 
 function checkViewPin() {
   const entered = ['pv0','pv1','pv2','pv3'].map(id => document.getElementById(id).value).join('');
@@ -1071,10 +1049,6 @@ dropZone.addEventListener('drop', e => {
 });
 
 function handleFiles(files) {
-  if (!db) {
-    showToast('Storage is still initializing. Please wait and try again in a moment.');
-    return;
-  }
   const remaining = 50 - photos.length;
   const toProcess = Math.min(files.length, remaining);
   if (files.length > remaining && remaining > 0) {
@@ -1085,64 +1059,82 @@ function handleFiles(files) {
     showToast('Gallery is full! Delete some photos to add more.');
     return;
   }
+
   let processed = 0;
   for (let i = 0; i < toProcess; i++) {
     const file = files[i];
     if (!file.type.startsWith('image/')) continue;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const photoData = { src: ev.target.result, name: file.name, date: new Date().toLocaleDateString() };
-      photos.push(photoData);
-      savePhotoToDB(photoData);
+    uploadPhotoToServer(file, () => {
       processed++;
-      if (processed === toProcess) { renderGallery(); showToast('Photos uploaded successfully!'); }
-    };
-    reader.readAsDataURL(file);
+      if (processed === toProcess) {
+        loadPhotosFromServer();
+        setTimeout(() => {
+          renderGallery();
+          showToast('✓ Photos uploaded successfully!');
+        }, 500);
+      }
+    });
+  }
+}
+
+async function uploadPhotoToServer(file, callback) {
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch(`${API_BASE}/photos/upload`, {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      showToast(`❌ Upload failed: ${error.error}`);
+    } else {
+      if (callback) callback();
+    }
+  } catch (err) {
+    showToast('❌ Cannot connect to server. Is it running?');
+    console.error('Upload error:', err);
   }
 }
 
 function savePhotoToDB(photoData) {
-  if (!db) {
-    showToast('Database not ready. Please try again.');
-    return;
-  }
-  const transaction = db.transaction(['photos'], 'readwrite');
-  const objectStore = transaction.objectStore('photos');
-  const request = objectStore.add(photoData);
-  
-  request.onerror = () => {
-    console.error('Failed to save photo:', request.error);
-    showToast('Failed to save photo. Storage might be full.');
-  };
+  // No longer used - photos are saved to server via API
 }
 
+
 function savePhotos() {
-  // This is kept for compatibility but savePhotoToDB is used for individual saves
-  if (!db) return;
-  const transaction = db.transaction(['photos'], 'readwrite');
-  const objectStore = transaction.objectStore('photos');
-  objectStore.clear();
-  
-  photos.forEach(photo => {
-    objectStore.add(photo);
-  });
+  // No longer used - photos are now stored on the server
 }
 
 function deletePhoto(index) {
   if (!confirm('Remove this photo from the gallery?')) return;
   const photoToDelete = photos[index];
-  photos.splice(index, 1);
   
-  // Delete from database
-  if (db) {
-    const transaction = db.transaction(['photos'], 'readwrite');
-    const objectStore = transaction.objectStore('photos');
-    const request = objectStore.delete(photoToDelete.id);
-    request.onerror = () => console.error('Failed to delete photo from DB');
+  // Delete from server
+  deletePhotoFromServer(photoToDelete.id, () => {
+    photos.splice(index, 1);
+    renderGallery();
+    showToast('✓ Photo removed from gallery');
+  });
+}
+
+async function deletePhotoFromServer(photoId, callback) {
+  try {
+    const response = await fetch(`${API_BASE}/photos/${photoId}`, {
+      method: 'DELETE'
+    });
+
+    if (response.ok) {
+      if (callback) callback();
+    } else {
+      showToast('Failed to delete photo');
+    }
+  } catch (err) {
+    showToast('Cannot connect to server');
+    console.error('Delete error:', err);
   }
-  
-  renderGallery();
-  showToast('Photo removed from gallery');
 }
 
 function renderGallery() {
@@ -1163,8 +1155,9 @@ function renderGallery() {
     const item = document.createElement('div');
     item.className = 'photo-item';
     item.style.animationDelay = (i % 20 * 0.04) + 's';
+    const imgUrl = photo.url || photo.src; // Use server URL or fallback to base64
     item.innerHTML = `
-      <img src="${photo.src}" alt="${photo.name}" onclick="openLightbox('${photo.src.replace(/'/g, "\\'")}')">
+      <img src="${imgUrl}" alt="${photo.name}" onclick="openLightbox('${imgUrl.replace(/'/g, "\\'")}')">
       <div class="photo-item-overlay">
         <span class="photo-item-name">${photo.name}</span>
         <button class="photo-delete-btn" onclick="event.stopPropagation();deletePhoto(${i})">✕</button>
@@ -1189,8 +1182,9 @@ function renderViewGallery() {
     const item = document.createElement('div');
     item.className = 'photo-item';
     item.style.animationDelay = (i % 20 * 0.04) + 's';
+    const imgUrl = photo.url || photo.src; // Use server URL or fallback to base64
     item.innerHTML = `
-      <img src="${photo.src}" alt="${photo.name}" onclick="openLightbox('${photo.src.replace(/'/g, "\\'")}')">
+      <img src="${imgUrl}" alt="${photo.name}" onclick="openLightbox('${imgUrl.replace(/'/g, "\\'")}')">
       <div class="photo-item-overlay">
         <span class="photo-item-name">${photo.name}</span>
       </div>
@@ -1239,11 +1233,8 @@ document.querySelectorAll('.wish-card').forEach((el, i) => {
   observer.observe(el);
 });
 
-// ============ INITIALIZE DATABASE ============
-initDB().catch(err => {
-  console.error('Failed to initialize database:', err);
-  showToast('Storage initialization failed. Some features may not work properly.');
-});
+// ============ INITIALIZE & LOAD PHOTOS ============
+loadPhotosFromServer();
 </script>
 </body>
 </html>
